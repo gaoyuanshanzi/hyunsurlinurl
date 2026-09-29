@@ -47,6 +47,11 @@ async function handleProxy(req: NextRequest, method: string) {
 
   const targetUrl = normalizeTargetUrl(targetParam);
 
+  // Compute absolute base origin of this Vercel service
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "hyunsurlinurl.vercel.app";
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  const appOrigin = `${proto}://${host}`;
+
   try {
     const parsedTarget = new URL(targetUrl);
     const origin = parsedTarget.origin;
@@ -102,7 +107,6 @@ async function handleProxy(req: NextRequest, method: string) {
     // Copy safe headers from upstream, stripping blocking or encoding-mismatch headers
     upstreamRes.headers.forEach((val, key) => {
       const lower = key.toLowerCase();
-      // CRITICAL: Strip content-encoding & content-length because Node fetch automatically decompresses
       if (
         lower === "x-frame-options" ||
         lower === "content-security-policy" ||
@@ -144,11 +148,17 @@ async function handleProxy(req: NextRequest, method: string) {
       responseHeaders.set("Content-Type", "text/html; charset=utf-8");
       let html = await upstreamRes.text();
 
+      // Convert all target="_blank" and target="_new" directly in HTML
+      html = html.replace(/\btarget=(["'])(_blank|_new)\1/gi, 'target="_self"');
+
+      // Absolute proxy base URL so it never resolves against <base>!
+      const absoluteProxyBase = `${appOrigin}/api/proxy?url=`;
+
       const injectionScript = `
         <script>
           (function() {
             var currentTargetUrl = ${JSON.stringify(finalUrl)};
-            var proxyBase = "/api/proxy?url=";
+            var proxyBase = ${JSON.stringify(absoluteProxyBase)};
             var realParent = null;
             try {
               realParent = window.parent;
@@ -179,13 +189,23 @@ async function handleProxy(req: NextRequest, method: string) {
             var origPushState = history.pushState;
             history.pushState = function() {
               var result = origPushState.apply(this, arguments);
-              notifyParentUrl(window.location.href);
+              try {
+                var newUrl = arguments[2] ? new URL(arguments[2], currentTargetUrl).href : window.location.href;
+                notifyParentUrl(newUrl);
+              } catch(e) {
+                notifyParentUrl(window.location.href);
+              }
               return result;
             };
             var origReplaceState = history.replaceState;
             history.replaceState = function() {
               var result = origReplaceState.apply(this, arguments);
-              notifyParentUrl(window.location.href);
+              try {
+                var newUrl = arguments[2] ? new URL(arguments[2], currentTargetUrl).href : window.location.href;
+                notifyParentUrl(newUrl);
+              } catch(e) {
+                notifyParentUrl(window.location.href);
+              }
               return result;
             };
             window.addEventListener('popstate', function() {
@@ -204,16 +224,17 @@ async function handleProxy(req: NextRequest, method: string) {
               return window;
             };
 
-            // Intercept all link clicks so NO new window is opened
+            // Intercept all link clicks so NO new window is opened and NO direct bypass
             document.addEventListener('click', function(e) {
               var a = e.target.closest('a');
-              if (a && a.href) {
+              if (a) {
                 if (a.target === '_blank' || a.target === '_new') {
                   a.target = '_self';
                 }
                 var href = a.getAttribute('href') || a.href;
                 if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.startsWith('mailto:')) {
                   e.preventDefault();
+                  e.stopPropagation();
                   var resolved = new URL(href, currentTargetUrl).href;
                   window.location.href = proxyBase + encodeURIComponent(resolved);
                 }

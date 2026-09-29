@@ -19,6 +19,7 @@ import {
 
 export default function HomeBrowser() {
   const [inputUrl, setInputUrl] = useState("https://www.dropbox.com");
+  const [iframeSrc, setIframeSrc] = useState("/api/proxy?url=" + encodeURIComponent("https://www.dropbox.com"));
   const [currentUrl, setCurrentUrl] = useState("https://www.dropbox.com");
   const [pageTitle, setPageTitle] = useState("Dropbox");
   const [isLoading, setIsLoading] = useState(false);
@@ -42,7 +43,7 @@ export default function HomeBrowser() {
   };
 
   // Compute actual iframe src
-  const getIframeSrc = (url: string, useProxy: boolean) => {
+  const buildIframeSrc = (url: string, useProxy: boolean) => {
     if (!url) return "about:blank";
     if (useProxy) {
       return `/api/proxy?url=${encodeURIComponent(url)}`;
@@ -53,10 +54,9 @@ export default function HomeBrowser() {
   const startLoadingState = () => {
     setIsLoading(true);
     if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current);
-    // Fallback: stop loading bar after 8 seconds in case external site assets take time
     loadingTimerRef.current = setTimeout(() => {
       setIsLoading(false);
-    }, 8000);
+    }, 6000);
   };
 
   const stopLoadingState = () => {
@@ -74,6 +74,12 @@ export default function HomeBrowser() {
     setCurrentUrl(nextUrl);
     startLoadingState();
 
+    const newSrc = buildIframeSrc(nextUrl, isProxyMode);
+    setIframeSrc(newSrc);
+    if (iframeRef.current) {
+      iframeRef.current.src = newSrc;
+    }
+
     // Update history
     setHistoryStack((prev) => {
       const upToCurrent = prev.slice(0, historyIndex + 1);
@@ -90,6 +96,11 @@ export default function HomeBrowser() {
       setInputUrl(prevUrl);
       setCurrentUrl(prevUrl);
       startLoadingState();
+      const newSrc = buildIframeSrc(prevUrl, isProxyMode);
+      setIframeSrc(newSrc);
+      if (iframeRef.current) {
+        iframeRef.current.src = newSrc;
+      }
     }
   };
 
@@ -101,6 +112,11 @@ export default function HomeBrowser() {
       setInputUrl(nextUrl);
       setCurrentUrl(nextUrl);
       startLoadingState();
+      const newSrc = buildIframeSrc(nextUrl, isProxyMode);
+      setIframeSrc(newSrc);
+      if (iframeRef.current) {
+        iframeRef.current.src = newSrc;
+      }
     }
   };
 
@@ -108,7 +124,7 @@ export default function HomeBrowser() {
   const handleReload = () => {
     startLoadingState();
     if (iframeRef.current) {
-      iframeRef.current.src = getIframeSrc(currentUrl, isProxyMode);
+      iframeRef.current.src = buildIframeSrc(currentUrl, isProxyMode);
     }
   };
 
@@ -117,12 +133,24 @@ export default function HomeBrowser() {
     handleNavigate("https://www.dropbox.com");
   };
 
+  // Mode change
+  const handleModeChange = (proxy: boolean) => {
+    setIsProxyMode(proxy);
+    startLoadingState();
+    const newSrc = buildIframeSrc(currentUrl, proxy);
+    setIframeSrc(newSrc);
+    if (iframeRef.current) {
+      iframeRef.current.src = newSrc;
+    }
+  };
+
   // Listen for messages from inside the proxy iframe (URL change sync)
   useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
       if (e.data && e.data.type === "HYUNS_URL_CHANGE") {
         const newUrl = e.data.url;
         if (newUrl && !newUrl.startsWith("data:") && !newUrl.startsWith("about:")) {
+          // Update address bar text and state without re-triggering iframe navigation
           setInputUrl(newUrl);
           setCurrentUrl(newUrl);
           if (e.data.title) {
@@ -195,10 +223,7 @@ export default function HomeBrowser() {
         <div className="flex items-center gap-3">
           <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
             <button
-              onClick={() => {
-                setIsProxyMode(true);
-                startLoadingState();
-              }}
+              onClick={() => handleModeChange(true)}
               className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${
                 isProxyMode
                   ? "bg-white text-sky-700 font-semibold shadow-sm"
@@ -210,10 +235,7 @@ export default function HomeBrowser() {
               스마트 프록시
             </button>
             <button
-              onClick={() => {
-                setIsProxyMode(false);
-                startLoadingState();
-              }}
+              onClick={() => handleModeChange(false)}
               className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
                 !isProxyMode
                   ? "bg-white text-slate-900 font-semibold shadow-sm"
@@ -367,8 +389,7 @@ export default function HomeBrowser() {
 
             <iframe
               ref={iframeRef}
-              key={`${currentUrl}-${isProxyMode}`}
-              src={getIframeSrc(currentUrl, isProxyMode)}
+              src={iframeSrc}
               onLoad={stopLoadingState}
               onError={stopLoadingState}
               className="w-full h-full border-0 bg-white"
