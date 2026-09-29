@@ -13,14 +13,11 @@ import {
   Minimize2,
   ExternalLink,
   ShieldCheck,
-  Sparkles,
   Layers,
-  ChevronRight,
-  Info
+  ChevronRight
 } from "lucide-react";
 
 export default function HomeBrowser() {
-  // Initial default target url is dropbox.com as mentioned in the prompt
   const [inputUrl, setInputUrl] = useState("https://www.dropbox.com");
   const [currentUrl, setCurrentUrl] = useState("https://www.dropbox.com");
   const [pageTitle, setPageTitle] = useState("Dropbox");
@@ -32,6 +29,7 @@ export default function HomeBrowser() {
   const [windowPreset, setWindowPreset] = useState<"standard" | "compact" | "wide">("standard");
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const loadingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Normalize URL helper
   const normalizeUrl = (raw: string) => {
@@ -52,12 +50,29 @@ export default function HomeBrowser() {
     return url;
   };
 
+  const startLoadingState = () => {
+    setIsLoading(true);
+    if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current);
+    // Fallback: stop loading bar after 8 seconds in case external site assets take time
+    loadingTimerRef.current = setTimeout(() => {
+      setIsLoading(false);
+    }, 8000);
+  };
+
+  const stopLoadingState = () => {
+    setIsLoading(false);
+    if (loadingTimerRef.current) {
+      clearTimeout(loadingTimerRef.current);
+      loadingTimerRef.current = null;
+    }
+  };
+
   // Handle URL navigation submit
   const handleNavigate = (target?: string) => {
     const nextUrl = normalizeUrl(target || inputUrl);
     setInputUrl(nextUrl);
     setCurrentUrl(nextUrl);
-    setIsLoading(true);
+    startLoadingState();
 
     // Update history
     setHistoryStack((prev) => {
@@ -65,10 +80,6 @@ export default function HomeBrowser() {
       return [...upToCurrent, nextUrl];
     });
     setHistoryIndex((prev) => prev + 1);
-
-    if (iframeRef.current) {
-      iframeRef.current.src = getIframeSrc(nextUrl, isProxyMode);
-    }
   };
 
   // History Back
@@ -78,10 +89,7 @@ export default function HomeBrowser() {
       setHistoryIndex(historyIndex - 1);
       setInputUrl(prevUrl);
       setCurrentUrl(prevUrl);
-      setIsLoading(true);
-      if (iframeRef.current) {
-        iframeRef.current.src = getIframeSrc(prevUrl, isProxyMode);
-      }
+      startLoadingState();
     }
   };
 
@@ -92,16 +100,13 @@ export default function HomeBrowser() {
       setHistoryIndex(historyIndex + 1);
       setInputUrl(nextUrl);
       setCurrentUrl(nextUrl);
-      setIsLoading(true);
-      if (iframeRef.current) {
-        iframeRef.current.src = getIframeSrc(nextUrl, isProxyMode);
-      }
+      startLoadingState();
     }
   };
 
   // Reload current page
   const handleReload = () => {
-    setIsLoading(true);
+    startLoadingState();
     if (iframeRef.current) {
       iframeRef.current.src = getIframeSrc(currentUrl, isProxyMode);
     }
@@ -123,13 +128,16 @@ export default function HomeBrowser() {
           if (e.data.title) {
             setPageTitle(e.data.title);
           }
-          setIsLoading(false);
+          stopLoadingState();
         }
       }
     };
 
     window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current);
+    };
   }, []);
 
   // Quick preset bookmarks
@@ -189,7 +197,7 @@ export default function HomeBrowser() {
             <button
               onClick={() => {
                 setIsProxyMode(true);
-                if (iframeRef.current) iframeRef.current.src = getIframeSrc(currentUrl, true);
+                startLoadingState();
               }}
               className={`px-2.5 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${
                 isProxyMode
@@ -204,7 +212,7 @@ export default function HomeBrowser() {
             <button
               onClick={() => {
                 setIsProxyMode(false);
-                if (iframeRef.current) iframeRef.current.src = getIframeSrc(currentUrl, false);
+                startLoadingState();
               }}
               className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
                 !isProxyMode
@@ -359,8 +367,10 @@ export default function HomeBrowser() {
 
             <iframe
               ref={iframeRef}
+              key={`${currentUrl}-${isProxyMode}`}
               src={getIframeSrc(currentUrl, isProxyMode)}
-              onLoad={() => setIsLoading(false)}
+              onLoad={stopLoadingState}
+              onError={stopLoadingState}
               className="w-full h-full border-0 bg-white"
               title="Embedded Nested Web Browser"
               sandbox="allow-forms allow-modals allow-pointer-lock allow-same-origin allow-scripts allow-downloads"

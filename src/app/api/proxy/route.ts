@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // Allow sufficient time for external sites
+export const maxDuration = 60;
 
 function normalizeTargetUrl(rawUrl: string): string {
   let url = rawUrl.trim();
@@ -51,7 +51,7 @@ async function handleProxy(req: NextRequest, method: string) {
     const parsedTarget = new URL(targetUrl);
     const origin = parsedTarget.origin;
 
-    // Build upstream headers
+    // Upstream headers
     const upstreamHeaders: Record<string, string> = {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
@@ -99,15 +99,20 @@ async function handleProxy(req: NextRequest, method: string) {
     // Build client response headers
     const responseHeaders = new Headers();
 
-    // Copy safe headers from upstream
+    // Copy safe headers from upstream, stripping blocking or encoding-mismatch headers
     upstreamRes.headers.forEach((val, key) => {
       const lower = key.toLowerCase();
-      // STRIP headers that prevent iframing or restrict navigation
+      // CRITICAL: Strip content-encoding & content-length because Node fetch automatically decompresses
       if (
         lower === "x-frame-options" ||
         lower === "content-security-policy" ||
         lower === "content-security-policy-report-only" ||
-        lower === "strict-transport-security"
+        lower === "strict-transport-security" ||
+        lower === "content-encoding" ||
+        lower === "content-length" ||
+        lower === "transfer-encoding" ||
+        lower === "connection" ||
+        lower === "keep-alive"
       ) {
         return;
       }
@@ -131,11 +136,12 @@ async function handleProxy(req: NextRequest, method: string) {
     responseHeaders.delete("x-frame-options");
     responseHeaders.delete("content-security-policy");
 
-    // Send original URL in header for parent frame detection
+    // Send original URL in header
     responseHeaders.set("X-Hyuns-Final-Url", finalUrl);
 
-    // If HTML: inject base tag, frame buster defense, popup blocker & link rewriter
+    // If HTML: inject base tag, popup blocker & link rewriter
     if (contentType.includes("text/html")) {
+      responseHeaders.set("Content-Type", "text/html; charset=utf-8");
       let html = await upstreamRes.text();
 
       const injectionScript = `
@@ -143,18 +149,21 @@ async function handleProxy(req: NextRequest, method: string) {
           (function() {
             var currentTargetUrl = ${JSON.stringify(finalUrl)};
             var proxyBase = "/api/proxy?url=";
-
-            // Frame buster prevention: prevent target sites from breaking out of iframe
+            var realParent = null;
             try {
-              Object.defineProperty(window, 'top', { get: function() { return window; } });
-              Object.defineProperty(window, 'parent', { get: function() { return window; } });
+              realParent = window.parent;
             } catch(e) {}
 
-            // Send URL update to outer hyunsurlinurl container
+            // Frame buster defense: prevent top breakout
+            try {
+              Object.defineProperty(window, 'top', { get: function() { return window; } });
+            } catch(e) {}
+
+            // Notify outer container of URL change
             function notifyParentUrl(url) {
               try {
-                if (window.parent && window.parent !== window) {
-                  window.parent.postMessage({
+                if (realParent && realParent !== window) {
+                  realParent.postMessage({
                     type: "HYUNS_URL_CHANGE",
                     url: url,
                     title: document.title || ""
@@ -163,7 +172,7 @@ async function handleProxy(req: NextRequest, method: string) {
               } catch(e) {}
             }
 
-            // Notify initial load
+            // Initial load notification
             notifyParentUrl(currentTargetUrl);
 
             // Hook history changes
@@ -186,7 +195,7 @@ async function handleProxy(req: NextRequest, method: string) {
               notifyParentUrl(window.location.href);
             });
 
-            // Prevent window.open from opening new windows/tabs -> navigate in place!
+            // Prevent window.open from opening new window/tab -> navigate in place!
             window.open = function(url) {
               if (url) {
                 var resolved = new URL(url, currentTargetUrl).href;
@@ -199,12 +208,11 @@ async function handleProxy(req: NextRequest, method: string) {
             document.addEventListener('click', function(e) {
               var a = e.target.closest('a');
               if (a && a.href) {
-                // If it attempts to open a new tab/window, force inside this frame
                 if (a.target === '_blank' || a.target === '_new') {
                   a.target = '_self';
                 }
                 var href = a.getAttribute('href') || a.href;
-                if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+                if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.startsWith('mailto:')) {
                   e.preventDefault();
                   var resolved = new URL(href, currentTargetUrl).href;
                   window.location.href = proxyBase + encodeURIComponent(resolved);
@@ -212,7 +220,7 @@ async function handleProxy(req: NextRequest, method: string) {
               }
             }, true);
 
-            // Intercept form submissions (e.g., login buttons, search inputs)
+            // Intercept form submissions
             document.addEventListener('submit', function(e) {
               var form = e.target;
               if (form) {
@@ -230,7 +238,6 @@ async function handleProxy(req: NextRequest, method: string) {
 
       const baseTag = `<base href="${finalOrigin}/">`;
 
-      // Insert base tag and injection script into <head> or at top
       if (html.includes("<head>")) {
         html = html.replace("<head>", `<head>${baseTag}${injectionScript}`);
       } else if (html.includes("<head ")) {
